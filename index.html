@@ -50,13 +50,13 @@
 <script>
 /* ===================== SETTINGS ===================== */
 /* Your Physics sheet's "Publish to web" link, ending in "gid=".
-   (File → Share → Publish to web → Published content & settings: tick Student View, Warm-Ups,
-    Warm-Up Bank and Quizzes only — NOT the Calendar, which has your sub instructions.) */
+   (File → Share → Publish to web → Published content & settings: tick Student View, Warmups Schedule,
+    Warmups and Check Points only — NOT the Calendar, which has your sub instructions.) */
 const PUB = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQQLUiiW6Cxw6Xs0aGfVo6CDQ8c7iJ_mTaGrmLVzJobrkJRE6l_L0NnAMH_CxGLjAEo5Bn6puXLlqEi/pub?single=true&output=csv&gid=";
 const CSV_URL   = PUB + "1341448792";   // Student View (calendar)
-const WEEKS_URL = PUB + "600053594";    // Warm-Ups tab (recent IDs in column F, spiral IDs in column G)
-const BANK_URL  = PUB + "1963903127";   // Warm-Up Bank tab
-const QUIZ_URL  = PUB + "555000111";    // Quizzes tab (checkpoints)
+const WEEKS_URL = PUB + "600053594";    // Warmups Schedule tab (recent IDs in column E, spiral IDs in column F)
+const BANK_URL  = PUB + "1963903127";   // Warmups tab
+const QUIZ_URL  = PUB + "555000111";    // Check Points tab
 const SCHOOL_YEAR_START = 2026;         // Aug–Dec = 2026, Jan–Jul = 2027
 const RECENT_PER_DAY = 3;               // questions from this week's recent bank
 const SPIRAL_PER_DAY = 2;               // questions from older material
@@ -69,6 +69,7 @@ const ENTRY = { name:"955562304", date:"311308184", warmup:"600833951", score:"2
 
 const QUESTIONS = {};    // "Q-0001": question
 const WEEKS = {};        // "WU 5.1": {recent:[q…], spiral:[q…], covers:"…"}
+let DAYS = [];           // the calendar, filled when the page loads
 const CHECKPOINTS = {};  // "T2-A": [questions]
 
 const P = new URLSearchParams(location.search);
@@ -101,30 +102,20 @@ function expandIDs(text){
   return [...new Set(out)].map(n=>"Q-"+String(n).padStart(4,"0"));
 }
 
-/* "WU 5.1c" -> {week:"WU 5.1", day:2} */
+/* "WU 5.1" (the same name every class day that week) -> {week:"WU 5.1", day:null}.
+   An old-style name with a day letter ("WU 5.1c") still works: day 2. */
 function parseWU(title){
-  const m=(title||"").match(/^\s*(WU\s*\d+\.\d+)\s*([a-e])\s*$/i); if(!m) return null;
+  const m=(title||"").match(/^\s*(WU\s*\d+\.\d+)\s*([a-e])?\s*$/i); if(!m) return null;
   const week="WU "+m[1].replace(/^WU\s*/i,"");
-  return WEEKS[week] ? {week, day:"abcde".indexOf(m[2].toLowerCase())} : null;
+  return WEEKS[week] ? {week, day:m[2]?"abcde".indexOf(m[2].toLowerCase()):null} : null;
 }
 function hasQuestions(w){ return w && (w.recent.length || w.spiral.length); }
 
-/* take n from a pool for this student/day: each student walks through the pool in their own order,
-   so a question doesn't repeat during the week until the whole pool has been seen */
-function slicePool(pool, n, day, seed){
-  if(!pool.length || !n) return [];
-  const order=shuffle(pool.map((_,i)=>i), rng(hash(seed)));
-  const out=[]; for(let k=0;k<n && k<pool.length;k++) out.push(pool[order[(day*n+k)%pool.length]]);
-  return out;
-}
-function pickSet(title, who){
+/* A random set every time a student starts (3 recent + 2 review), so classmates get different questions.
+   (Repeats from day to day are fine: scores are what's tracked.) */
+function pickSet(title){
   const w=parseWU(title); if(!w) return null;
-  const wk=WEEKS[w.week], id=norm(who);
-  let nR=Math.min(RECENT_PER_DAY, wk.recent.length), nS=PER_DAY-nR;   // no recent bank yet? fill from spiral
-  if(nS>wk.spiral.length){ nS=wk.spiral.length; nR=Math.min(PER_DAY-nS, wk.recent.length); }
-  const recent=slicePool(wk.recent, nR, w.day, w.week+"|recent|"+id);
-  const spiral=slicePool(wk.spiral, nS, w.day, w.week+"|spiral|"+id);
-  return {week:w.week, items:[...recent.map(q=>({...q,kind:"recent"})), ...spiral.map(q=>({...q,kind:"spiral"}))]};
+  return {week:w.week, items:randomSet(w.week)};
 }
 function randomSet(week, avoid){
   const wk=WEEKS[week], seen=new Set((avoid||[]).map(q=>q.id));
@@ -148,7 +139,7 @@ function cpPools(code){
 }
 function pickCheckpoint(code, who, avoid){
   const {cur,prev}=cpPools(code), seen=new Set((avoid||[]).map(q=>q.q));
-  const r=avoid?Math.random:rng(hash(code+"|"+norm(who)));
+  const r=Math.random;   // a random mix every time
   let set=[...shuffle(cur.filter(q=>!seen.has(q.q)),r), ...shuffle(prev.filter(q=>!seen.has(q.q)),r)].slice(0,PER_DAY);
   if(set.length<PER_DAY) set=set.concat(shuffle([...cur,...prev].filter(q=>!set.includes(q)),r)).slice(0,PER_DAY);
   return shuffle(set,r);
@@ -160,11 +151,11 @@ let state=null;
 function fmtDate(d){return d.toLocaleDateString("en-US",{weekday:"short",month:"numeric",day:"numeric"});}
 function prep(items){ return items.map(q=>({...q, order:shuffle([0,1,2,3],Math.random), correct:"ABCD".indexOf(q.ans)})); }
 
-function begin(title, dateLabel){
-  state={title,dateLabel,scored:true,attempt:1,i:0,results:[],cp:cpCode(title)};
+function begin(title, dateLabel, d){
+  state={title,dateLabel,d,scored:true,attempt:1,i:0,results:[],cp:cpCode(title)};
   intro();
 }
-function attemptKey(){ return "pwu_try|"+state.name.toLowerCase()+"|"+state.title; }
+function attemptKey(){ return "pwu_try|"+state.name.toLowerCase()+"|"+state.title+"|"+state.dateLabel; }   // one count per day
 
 function intro(){
   const name=store.get("wu_name");
@@ -187,7 +178,7 @@ function intro(){
       if(prev>=1){ state.attempt=prev+1; state.items=prep(pickCheckpoint(state.cp, n, first)); }
       else state.items=prep(first);
     } else {
-      const s=pickSet(state.title, n); state.week=s.week;
+      const s=pickSet(state.title); state.week=s.week;
       if(prev>=1){ state.attempt=prev+1; state.items=prep(randomSet(s.week, s.items)); }
       else state.items=prep(s.items);
     }
@@ -258,7 +249,7 @@ function finish(){
 
 /* ---------- home screen: today's warm-up + past ones to choose from ---------- */
 let HOME={today:null,msg:"",past:[]};
-function go(title,label){ try{ history.pushState({wu:title},""); }catch(e){} begin(title,label); }
+function go(title,label,d){ try{ history.pushState({wu:title},""); }catch(e){} begin(title,label,d); }
 function backHome(){ if(history.state && history.state.wu){ history.back(); } else home(); }
 window.addEventListener("popstate",()=>home());
 app.addEventListener("click",e=>{ if(e.target.closest(".back")) backHome(); });
@@ -266,7 +257,7 @@ const backLink=()=>`<button class="back" type="button">← All warm-ups</button>
 
 function home(){
   const t=HOME.today;
-  const opts=HOME.past.slice(-20).reverse().map(d=>{const x=d.cpOk?d.cp:d.wu; return `<option value="${esc(x)}|${esc(d.label)}">${esc(d.label)} — ${esc(x)}</option>`;}).join("");
+  const opts=HOME.past.slice(-20).reverse().map(d=>{const x=d.cpOk?d.cp:d.wu; return `<option value="${esc(x)}|${esc(d.label)}|${d.d.getTime()}">${esc(d.label)} — ${esc(x)}</option>`;}).join("");
   app.innerHTML=`
     <p class="title" style="margin:0 0 6px">Physics Warm Ups</p>
     ${t?`<p style="margin:0">Today, ${esc(t.label)}:</p>
@@ -274,16 +265,19 @@ function home(){
        :`<p style="margin:0">${HOME.msg}</p>`}
     ${opts?`<label for="mk">Do a different day's warm-up or checkpoint:</label>
       <select id="mk"><option value="">Choose a day…</option>${opts}</select>`:""}`;
-  const tb=document.getElementById("today"); if(tb) tb.onclick=()=>go(t.title,t.label);
+  const tb=document.getElementById("today"); if(tb) tb.onclick=()=>go(t.title,t.label,t.d);
   const mk=document.getElementById("mk");
-  if(mk) mk.onchange=()=>{ if(!mk.value) return; const [x,label]=mk.value.split("|"); go(x,label); };
+  if(mk) mk.onchange=()=>{ if(!mk.value) return; const [x,label,ms]=mk.value.split("|"); go(x,label,new Date(+ms)); };
 }
 
 const getCSV=url=>fetch(url+"&t="+Date.now()).then(r=>{if(!r.ok)throw new Error(r.status);return r.text();}).then(parseCSV);
 
 /* read a question tab: columns are found by their header names */
+/* the heading row is the first row holding a cell named `name` (row 1 may be a warning) */
+function headerAt(rows, name){ const i=rows.findIndex(r=>r.some(c=>(c||"").trim().toLowerCase()===name)); return i<0?0:i; }
 function readQuestions(rows){
-  const head=(rows[0]||[]).map(h=>h.trim().toLowerCase());
+  const h=headerAt(rows,"question");
+  const head=(rows[h]||[]).map(x=>x.trim().toLowerCase());
   const c=(...names)=>{
     for(const n of names){const i=head.indexOf(n);if(i>=0)return i;}
     for(const n of names){const i=head.findIndex(h=>h.startsWith(n));if(i>=0)return i;}
@@ -291,7 +285,7 @@ function readQuestions(rows){
   const cID=c("id"), cQ=c("question"), cA=c("choice a"), cB=c("choice b"), cC=c("choice c"), cD=c("choice d"),
         cAns=c("correct answer","answer"), cEx=c("explanation"), cSk=c("concept / skill","skill"), cCalc=c("calculator");
   const out=[];
-  rows.slice(1).forEach(r=>{
+  rows.slice(h+1).forEach(r=>{
     const g=i=>i>=0?(r[i]||"").trim():"";
     const q={id:g(cID), skill:g(cSk), q:g(cQ), ch:[g(cA),g(cB),g(cC),g(cD)], ans:g(cAns).toUpperCase(), expl:g(cEx), calc:/^y/i.test(g(cCalc))?"Yes":"No"};
     if(!q.q || q.ch.some(x=>!x) || !"ABCD".includes(q.ans) || q.ans.length!==1) return;   // skip incomplete rows
@@ -302,26 +296,28 @@ function readQuestions(rows){
 
 Promise.all([getCSV(CSV_URL), getCSV(WEEKS_URL), getCSV(BANK_URL), getCSV(QUIZ_URL)])
  .then(([rows, weekRows, bankRows, quizRows])=>{
-  /* Warm-Up Bank: questions by ID (Q-0001) */
+  /* Warmups: questions by ID (Q-0001) */
   readQuestions(bankRows).forEach(q=>{ if(/^Q-?\d+$/i.test(q.id)) QUESTIONS["Q-"+q.id.replace(/\D/g,"").padStart(4,"0")]=q; });
-  /* Warm-Ups tab: week code in the first column, recent IDs in F, spiral IDs in G (found by header when possible) */
-  const wh=(weekRows[0]||[]).map(h=>h.trim().toLowerCase());
+  /* Warmups Schedule: week code in the first column, recent IDs in E, spiral IDs in F (found by header when possible) */
+  const wAt=headerAt(weekRows,"warm-up"), wh=(weekRows[wAt]||[]).map(h=>h.trim().toLowerCase());
   const find=(p,fb)=>{const i=wh.findIndex(h=>h.startsWith(p)); return i>=0?i:fb;};
-  const iR=find("recent questions",5), iS=find("spiral questions",6);
-  weekRows.slice(1).forEach(r=>{
+  const iR=find("recent questions",4), iS=find("spiral questions",5);
+  weekRows.slice(wAt+1).forEach(r=>{
     const code=(r[0]||"").trim(); if(!/^WU\s*\d+\.\d+$/i.test(code)) return;
     const look=ids=>expandIDs(ids).map(id=>QUESTIONS[id]).filter(Boolean);
     WEEKS["WU "+code.replace(/^WU\s*/i,"")]={recent:look(r[iR]), spiral:look(r[iS])};
   });
-  /* Quizzes: checkpoint from the ID column (T2-A-7 -> T2-A) */
+  /* Check Points: checkpoint from the ID column (T2-A-7 -> T2-A) */
   readQuestions(quizRows).forEach(q=>{ const m=q.id.match(/^(.+-[A-Z])-\d+$/i); if(m) (CHECKPOINTS[m[1].toUpperCase()]=CHECKPOINTS[m[1].toUpperCase()]||[]).push(q); });
 
-  const head=rows[0]||[];
+  const hr=rows.findIndex(r=>(r[0]||"").trim().toLowerCase()==="week" && (r[1]||"").trim().toLowerCase()==="date");
+  const head=rows[Math.max(0,hr)]||[];
   const col=(name,fb)=>{const i=head.findIndex(h=>h.trim().toLowerCase()===name.toLowerCase());return i>=0?i:fb;};
   const cD=col("Date",1), cT=col("Topic",2), cW=col("Warm Up",3), cC=col("Checkpoint",-1);
   const days=[];
-  rows.slice(1).forEach(r=>{const d=toDate(r[cD]); if(d) days.push({d,label:fmtDate(d),topic:r[cT]||"",wu:(r[cW]||"").trim(),cp:cC>=0?(r[cC]||"").trim():""});});
+  rows.slice(Math.max(0,hr)+1).forEach(r=>{const d=toDate(r[cD]); if(d) days.push({d,label:fmtDate(d),topic:r[cT]||"",wu:(r[cW]||"").trim(),cp:cC>=0?(r[cC]||"").trim():""});});
   days.forEach(x=>{ x.cpOk=!!cpCode(x.cp); const w=parseWU(x.wu); x.wuOk=!!(w && hasQuestions(WEEKS[w.week])); });
+  DAYS=days;
   const today=P.get("date")?new Date(P.get("date")+"T00:00:00"):new Date(); today.setHours(0,0,0,0);
   const past=days.filter(x=>x.d<today && (x.wuOk||x.cpOk));
 
@@ -331,15 +327,17 @@ Promise.all([getCSV(CSV_URL), getCSV(WEEKS_URL), getCSV(BANK_URL), getCSV(QUIZ_U
   if(!t) msg="There's no class today, so there's no warm-up.";
   else if(/no school/i.test(t.topic)) msg="There's no school today.";
   else if(t.wu && parseWU(t.wu) && !t.wuOk) msg=`Today's warm-up (${esc(t.wu)}) isn't a quiz. Your teacher will tell you what to do.`;
-  HOME={today:todayTitle?{title:todayTitle,label:t.label}:null,msg,past};
+  HOME={today:todayTitle?{title:todayTitle,label:t.label,d:t.d}:null,msg,past};
   try{ history.replaceState({home:1},""); }catch(e){}
 
-  const asked=P.get("wu");     // ?wu=WU%205.1c or ?wu=Checkpoint%20T2-A opens that one
+  const asked=P.get("wu");     // ?wu=WU%205.1&date=2026-09-09 or ?wu=Checkpoint%20T2-A opens that one
   if(asked){
-    const day=days.find(x=>x.wu===asked||x.cp===asked);
-    if(cpCode(asked) || (parseWU(asked) && hasQuestions(WEEKS[parseWU(asked).week]))) return go(asked, day?day.label:"");
+    // ?date= picks which day of that week (the class page sends both)
+    const same=x=>x.wu===asked||x.cp===asked;
+    const day=(P.get("date") && days.find(x=>same(x) && x.d.getTime()===today.getTime())) || days.find(same);
+    if(cpCode(asked) || (parseWU(asked) && hasQuestions(WEEKS[parseWU(asked).week]))) return go(asked, day?day.label:"", day?day.d:null);
   }
-  if(HOME.today) return go(HOME.today.title, HOME.today.label);
+  if(HOME.today) return go(HOME.today.title, HOME.today.label, HOME.today.d);
   home();
  })
  .catch(()=>{ app.innerHTML=`<p class="title">Warm Up</p><p>Couldn't load today's warm-up. Refresh the page or tell your teacher.</p>`; });
